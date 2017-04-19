@@ -4,20 +4,40 @@
 //Math tells us this ratio is 6/'ratio of coprimes'
 //So I decided to make a multithreaded program to test this with very large number of data
 //to compile: g++ random_numbers.cpp -O3 -o random_pi -std=c++11 -lpthread
+//--------------------------------------------------------------------------------------------------------------
 
+#include <string>
 #include <random>
 #include <cmath>
-#include <future>
+#include <mutex>
 #include <iostream>
 #include <climits>
 #include <iomanip>
+#include <thread>
+#include <csignal>
+#include <condition_variable>
 
-constexpr int BATCH_SIZE = 1000000;
+constexpr int BATCH_SIZE = 3000000;
 constexpr int NBR_BATCH = 8;
 
+unsigned long int total_tries = 0;
+unsigned long int total_coprimes = 0;
+
+bool kill_switch = false;
+
+std::mutex data_lock;
+std::condition_variable wait_sigint;
+
+//Handler func
+void sigint_handler (int param) {
+    kill_switch = true;
+    wait_sigint.notify_all();
+}
+
 //This is where the bit of probabilistic magic happens
-double pi(unsigned long int tries, unsigned long int coprimes) {
-    long double prob = coprimes / (tries * 1.0);
+//Not thread safe if data_lock is not locked
+double pi() {
+    long double prob = total_coprimes / (total_tries * 1.0);
     return std::sqrt(6L/prob);
 }
 
@@ -32,46 +52,44 @@ unsigned long int gcd(unsigned long int a, unsigned long int b) {
     return a;
 }
 
-//Generate @size number of random pair of numbers and find the number of coprimes there are
-unsigned long int generate_coprimes(int size) {
-    std::random_device rd;
-    static thread_local std::mt19937 generator(rd());  //Static threadlocal for performance and safety
-    std::uniform_int_distribution<unsigned long int> uniform_dist(1, ULONG_MAX);
+//Thread safe function for threads to update coprime and tries values and display the new approximation
+void update_count(unsigned long int tries, unsigned long int coprimes) {
+    data_lock.lock();
+    total_tries += tries;
+    total_coprimes += coprimes;
+    std::cout << std::to_string(total_tries) << ": " << std::setprecision (30) <<  pi() << '\n';
+    data_lock.unlock();
+}
 
-    int count = 0;
+//Generate @size number of random pair of numbers and find the number of coprimes there are
+void generate_coprimes(int size) {
+    std::random_device rd;
+    std::mt19937 generator(rd());  //Static threadlocal for performance and safety
+    std::uniform_int_distribution<unsigned long int> uniform_dist(1, ULONG_MAX);
     unsigned long int rand1;
     unsigned long int rand2;
-    for(int i = 0; i < size; ++i) {
-        rand1 = uniform_dist(generator);
-        rand2 = uniform_dist(generator);
 
-        if (gcd(rand1, rand2) == 1) {  //2 numbers having a greatest common denominator of 1 are coprimes
-            count += 1;
+    while (!kill_switch) {
+        int count = 0;        
+        for(int i = 0; i < size; ++i) {
+            rand1 = uniform_dist(generator);
+            rand2 = uniform_dist(generator);
+
+            if (gcd(rand1, rand2) == 1) {  //2 numbers having a greatest common denominator of 1 are coprimes
+                count += 1;
+            }
         }
+        update_count(size, count);
     }
-    return count;
 }
 
 int main() {
-    unsigned long int coprimes = 0;
+    std::mutex kill_process;    
+    std::unique_lock<std::mutex> process_life(kill_process);
+    std::signal(SIGINT, sigint_handler);
 
-    //Max safe precision for an unsigned long
-    //This could theoretically end someday, but you probably won't be around to see it
-    for (unsigned long int tries = NBR_BATCH * BATCH_SIZE;
-            tries < ULONG_MAX - (NBR_BATCH * BATCH_SIZE);
-            tries += NBR_BATCH * BATCH_SIZE)
-        {
-
-        std::vector<std::future<unsigned long int>> futures{};  //Thread container
-        for(int i = 0; i < NBR_BATCH; ++i) {  //Generate a threads
-            futures.emplace_back(std::async(std::launch::async, generate_coprimes, BATCH_SIZE));
-        }
-
-        for (size_t i = 0; i < futures.size(); ++i) {  //Get number of coprimes in batch of random numbers
-            coprimes += futures.at(i).get();
-        }
-        
-        //approximate a value for Pi using statistical probability of 2 random numbers being coprimes
-        std::cout << std::to_string(tries) << ": " << std::setprecision (30) <<  pi(tries, coprimes) << '\n';
-    }    
+    for(int i = 0; i < NBR_BATCH; ++i) {  //Generate threads
+        std::thread(generate_coprimes, BATCH_SIZE).detach();
+    }
+    wait_sigint.wait(process_life);
 }
